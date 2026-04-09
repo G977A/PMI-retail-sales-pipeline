@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Airflow
+airflow.db
+airflow-webserver.pid
+logs/
+plugins/
+
+# Generated data (we don't commit fake data — the script regenerates it)
+data_generator/output/
+*.csv
+!tests/fixtures/*.csv
+
+# Docker
+.docker/
+
+# OS
+Thumbs.db
