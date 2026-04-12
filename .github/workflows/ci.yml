@@ -1,0 +1,139 @@
+name: CI
+
+# Run on every push to main + every pull request targeting main.
+# You can add other branches (e.g. develop) to this list as the project grows.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------
+  # Job 1: Lint Python code.
+  # Fast, cheap, runs first. Catches syntax errors, undefined
+  # variables, and bad imports before we spend time on the DB job.
+  # ---------------------------------------------------------------
+  lint:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff==0.4.4
+
+      # Ruff is a fast modern linter — faster than flake8, catches more bugs.
+      # We select E (errors), F (pyflakes), W (warnings) but ignore E501
+      # (line-too-long) because it's cosmetic, not a correctness issue.
+      - name: Run ruff
+        run: ruff check dags/ data_generator/ tests/ --select E,F,W --ignore E501
+
+  # ---------------------------------------------------------------
+  # Job 2: Integration test.
+  # Spins up a real Postgres, applies the schema from scratch,
+  # loads seed data via the generator, runs the transformation,
+  # and executes the data quality checks.
+  #
+  # If this passes, you KNOW your pipeline works on a clean machine —
+  # not just on your laptop where state has accumulated over time.
+  # ---------------------------------------------------------------
+  integration-test:
+    name: Integration test (Postgres + pipeline)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    # GitHub Actions lets us start service containers alongside the job.
+    # This Postgres is ephemeral — created fresh, destroyed after the job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: retail
+        ports:
+          - 5432:5432
+        # Health check so the job waits for Postgres to actually be ready
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: retail
+      WAREHOUSE_CONN: postgresql://postgres:postgres@localhost:5432/retail
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # psql client for running the SQL files
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # --- Schema application ---
+      # This is the step that would have caught your "database not initialized"
+      # issue from earlier. If any SQL file has a syntax error or references
+      # a non-existent table, this job fails fast.
+      - name: Apply schema (extensions, raw, warehouse)
+        run: |
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
+            -f sql/schema/00_extensions.sql
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
+            -f sql/schema/01_create_schemas.sql
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
+            -f sql/schema/02_create_warehouse.sql
+
+      # --- Seed data ---
+      # Generate a small amount of data (7 days is plenty for testing)
+      # so the suite runs fast in CI.
+      - name: Generate seed data (7 days)
+        run: python data_generator/generate_sales.py --days 7
+
+      # --- Transformation ---
+      # Run the raw -> warehouse SQL. ON_ERROR_STOP=1 means any SQL
+      # error fails the whole job immediately (no silent partial loads).
+      - name: Run transformation (raw -> warehouse)
+        run: |
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
+            -f sql/transformations/03_transform_raw_to_warehouse.sql
+
+      # --- Data quality ---
+      # Run the same data quality checks the DAG uses.
+      # If any assertion fails here, the pipeline is broken.
+      - name: Run data quality checks
+        run: pytest tests/ -v
+
+      # --- Smoke test: a real analytics query works ---
+      # If the star schema is genuinely queryable, this produces output.
+      - name: Smoke test — star schema analytics query
+        run: |
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 -c "
+            SELECT ds.region, COUNT(*) AS txn_count, SUM(fs.total_amount) AS revenue
+            FROM warehouse.fact_sales fs
+            JOIN warehouse.dim_store ds ON ds.store_key = fs.store_key
+            GROUP BY ds.region
+            ORDER BY revenue DESC;
+          "
