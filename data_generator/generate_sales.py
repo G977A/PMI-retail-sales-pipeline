@@ -17,17 +17,21 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import psycopg2
+import os
+
 from faker import Faker
 
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
+# Host comes from PGHOST env var so this works both locally (localhost)
+# and from inside Docker containers (postgres service name).
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "retail",
-    "user": "postgres",
-    "password": "postgres",
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "retail"),
+    "user": os.environ.get("PGUSER", "postgres"),
+    "password": os.environ.get("PGPASSWORD", "postgres"),
 }
 
 NUM_STORES = 50
@@ -184,6 +188,19 @@ def main():
 
     all_sales = []
     txn_counter = [0]
+
+    # If appending, resume the txn counter from the highest existing ID
+    # so we don't collide with existing transaction_ids.
+    if args.append:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(CAST(SUBSTRING(transaction_id FROM 4) AS BIGINT)) "
+                "FROM raw.sales WHERE transaction_id LIKE 'TXN%'"
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                txn_counter[0] = int(row[0])
+
     end_date = date.today()
     start_date = end_date - timedelta(days=args.days - 1)
 
