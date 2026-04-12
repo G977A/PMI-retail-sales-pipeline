@@ -1,4 +1,30 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.11
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_metadata/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: 'psycopg2-binary==2.9.9 faker==25.0.0'
+    # Connection string for the warehouse Postgres (the one your data lives in)
+    WAREHOUSE_CONN: postgresql://postgres:postgres@postgres:5432/retail
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./sql:/opt/airflow/sql
+    - ./data_generator:/opt/airflow/data_generator
+    - airflow_logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    airflow_metadata:
+      condition: service_healthy
+
 services:
+  # -----------------------------------------------------------------
+  # Your data warehouse (the Postgres your pipelines write to)
+  # -----------------------------------------------------------------
   postgres:
     image: postgres:16
     container_name: retail_postgres
@@ -17,5 +43,76 @@ services:
       timeout: 5s
       retries: 5
 
+  # -----------------------------------------------------------------
+  # Airflow's own metadata DB (separate from the warehouse — standard practice)
+  # -----------------------------------------------------------------
+  airflow_metadata:
+    image: postgres:16
+    container_name: airflow_metadata
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_metadata_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # -----------------------------------------------------------------
+  # Airflow init — runs database migrations and creates the admin user.
+  # Runs once and exits.
+  # -----------------------------------------------------------------
+  airflow_init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin || true
+    restart: "no"
+
+  # -----------------------------------------------------------------
+  # Airflow webserver — the UI at http://localhost:8080
+  # -----------------------------------------------------------------
+  airflow_webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      airflow_init:
+        condition: service_completed_successfully
+
+  # -----------------------------------------------------------------
+  # Airflow scheduler — the brain that triggers DAG runs on schedule
+  # -----------------------------------------------------------------
+  airflow_scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    restart: always
+    depends_on:
+      airflow_init:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
+  airflow_metadata_data:
+  airflow_logs:
