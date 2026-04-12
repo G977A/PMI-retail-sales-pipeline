@@ -244,4 +244,4 @@ with DAG(
     )
 
     # Dependency chain: each task runs only if the previous one succeeded
-    t1_generate >> t2_transform >> t3_quality >> t4_summary
+    t1_generate >> t2_transform >> t3_quality >> t4_summary 

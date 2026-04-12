@@ -162,4 +162,4 @@ def test_warehouse_has_no_plaintext_email_columns(conn):
     assert count == 0, (
         "Warehouse schema contains plaintext PII columns. "
         "Only hashed versions (owner_*_hash) are allowed."
-    )
+    ) 
