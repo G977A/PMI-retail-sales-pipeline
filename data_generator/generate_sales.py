@@ -164,6 +164,12 @@ def write_sales(conn, sales, append=False):
     print(f"  ✓ Inserted {len(sales)} sales transactions")
 
 
+def table_is_empty(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {table_name};")
+        return cur.fetchone()[0] == 0
+
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -182,8 +188,12 @@ def main():
     stores = generate_stores()
     products = generate_products()
 
-    if not args.append:
+    # In full-refresh mode, always rewrite master data.
+    # In append mode, seed master data only if the tables are empty.
+    if not args.append or table_is_empty(conn, "raw.stores"):
         write_stores(conn, stores)
+
+    if not args.append or table_is_empty(conn, "raw.products"):
         write_products(conn, products)
 
     all_sales = []
