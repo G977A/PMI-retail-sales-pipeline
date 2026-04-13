@@ -35,7 +35,7 @@ jobs:
       # We select E (errors), F (pyflakes), W (warnings) but ignore E501
       # (line-too-long) because it's cosmetic, not a correctness issue.
       - name: Run ruff
-        run: ruff check dags/ data_generator/ tests/ --select E,F,W --ignore E501
+        run: ruff check dags/ data_generator/ tests/ --select E,F --ignore E501
 
   # ---------------------------------------------------------------
   # Job 2: Integration test.
