@@ -35,7 +35,7 @@ jobs:
       # We select E (errors), F (pyflakes), W (warnings) but ignore E501
       # (line-too-long) because it's cosmetic, not a correctness issue.
       - name: Run ruff
-        run: ruff check dags/ data_generator/ tests/ --select E,F --ignore E501
+        run: ruff check dags/ data_generator/ scripts/ tests/ --select E,F --ignore E501
 
   # ---------------------------------------------------------------
   # Job 2: Integration test.
@@ -97,7 +97,7 @@ jobs:
       # This is the step that would have caught your "database not initialized"
       # issue from earlier. If any SQL file has a syntax error or references
       # a non-existent table, this job fails fast.
-      - name: Apply schema (extensions, raw, warehouse)
+      - name: Apply schema (extensions, raw, warehouse, audit log)
         run: |
           psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
             -f sql/schema/00_extensions.sql
@@ -105,6 +105,8 @@ jobs:
             -f sql/schema/01_create_schemas.sql
           psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
             -f sql/schema/02_create_warehouse.sql
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 \
+            -f sql/schema/03_create_audit_log.sql
 
       # --- Seed data ---
       # Generate a small amount of data (7 days is plenty for testing)
@@ -136,4 +138,33 @@ jobs:
             JOIN warehouse.dim_store ds ON ds.store_key = fs.store_key
             GROUP BY ds.region
             ORDER BY revenue DESC;
+          "
+
+      # --- GDPR smoke test: right-to-be-forgotten flow ---
+      # Prove that the deletion script works end-to-end: dry-run, delete,
+      # verify rows are gone, verify audit log entry was written.
+      - name: Smoke test — GDPR right-to-be-forgotten
+        run: |
+          # Dry run first (should not delete anything)
+          python scripts/gdpr_delete.py --store-id STR0001 --operator ci_bot --dry-run
+
+          # Real deletion
+          python scripts/gdpr_delete.py --store-id STR0001 --operator ci_bot \
+              --reason "CI smoke test"
+
+          # Verify the store is gone from all four tables
+          psql -h localhost -U postgres -d retail -v ON_ERROR_STOP=1 -c "
+            DO \$\$
+            DECLARE remaining INT;
+            BEGIN
+                SELECT COUNT(*) INTO remaining FROM raw.stores WHERE store_id='STR0001';
+                IF remaining != 0 THEN RAISE EXCEPTION 'raw.stores not cleared'; END IF;
+                SELECT COUNT(*) INTO remaining FROM raw.sales WHERE store_id='STR0001';
+                IF remaining != 0 THEN RAISE EXCEPTION 'raw.sales not cleared'; END IF;
+                SELECT COUNT(*) INTO remaining FROM warehouse.dim_store WHERE store_id='STR0001';
+                IF remaining != 0 THEN RAISE EXCEPTION 'warehouse.dim_store not cleared'; END IF;
+                SELECT COUNT(*) INTO remaining FROM raw.gdpr_audit_log WHERE subject_store_id='STR0001';
+                IF remaining != 1 THEN RAISE EXCEPTION 'audit log entry missing'; END IF;
+                RAISE NOTICE 'GDPR deletion verified: all rows removed, audit entry present';
+            END \$\$;
           "
